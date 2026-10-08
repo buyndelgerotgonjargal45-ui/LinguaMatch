@@ -10,8 +10,14 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useRequireUser } from "@/lib/auth";
-import { getSocket } from "@/lib/socket";
+import { getSocket, useSocketStatus, type SocketStatus } from "@/lib/socket";
 import { formatClock } from "@/lib/utils";
+
+const CONNECTION_MESSAGES: Partial<Record<SocketStatus, string>> = {
+  unreachable: "Waking up the server, this can take up to a minute...",
+  reconnecting: "Connection lost. Reconnecting… you'll keep your place in the queue.",
+  auth_error: "We couldn't verify your session with the matching server. Please reload the page.",
+};
 
 export default function MatchPage() {
   const user = useRequireUser();
@@ -22,47 +28,59 @@ export default function MatchPage() {
   const [elapsed, setElapsed] = useState(0);
   const language = user?.activeTargetLanguage ?? null;
 
+  const socketStatus = useSocketStatus();
+
+  // Queue membership and socket listeners. Everything registered here is removed on cancel or
+  // when leaving the page; the socket itself is shared with /room and stays open.
   useEffect(() => {
     if (!language) return;
     const socket = getSocket();
-    const join = () => socket.emit("queue:join", { targetLanguage: language });
+    let active = true;
+    const join = () => {
+      if (!active) return;
+      setError(null);
+      socket.emit("queue:join", { targetLanguage: language });
+    };
     const onStatus = (s: { waiting: number; level: CefrLevel }) => {
       setWaiting(s.waiting);
       setLevel(s.level);
     };
-    const onMatched = ({ roomId }: { roomId: string }) => router.push(`/room/${roomId}`);
+    const onMatched = ({ roomId }: { roomId: string }) => {
+      if (active) router.push(`/room/${roomId}`);
+    };
     const onError = ({ message }: { message: string }) => setError(message);
-    const onConnectError = (err: Error) =>
-      setError(err.message === "unauthorized" ? "Your session expired. Please log in again." : "Can't reach the server. Retrying…");
 
     socket.on("queue:status", onStatus);
     socket.on("queue:matched", onMatched);
     socket.on("queue:error", onError);
-    socket.on("connect_error", onConnectError);
-    socket.on("connect", join); // re-queue after a reconnect
+    socket.on("connect", join); // re-queue after every (re)connect
     if (socket.connected) join();
 
-    const started = Date.now();
-    const timer = setInterval(() => setElapsed((Date.now() - started) / 1000), 1000);
     return () => {
-      clearInterval(timer);
+      active = false;
       // Leaving the page leaves the queue (a no-op if we were just matched).
       socket.emit("queue:leave");
       socket.off("queue:status", onStatus);
       socket.off("queue:matched", onMatched);
       socket.off("queue:error", onError);
-      socket.off("connect_error", onConnectError);
       socket.off("connect", join);
     };
   }, [language, router]);
 
+  // The wait timer is independent of the connection, so it keeps counting through reconnects.
+  useEffect(() => {
+    if (!language) return;
+    const started = Date.now();
+    const timer = setInterval(() => setElapsed((Date.now() - started) / 1000), 1000);
+    return () => clearInterval(timer);
+  }, [language]);
+
   if (!user || !language) return <FullPageSpinner />;
   const myLevel = level ?? user.targetLanguages.find((t) => t.language === language)?.level;
 
-  const cancel = () => {
-    getSocket().emit("queue:leave");
-    router.push("/profile");
-  };
+  // Unmounting runs the cleanup above (leave queue, remove listeners, stop the timer).
+  const cancel = () => router.push("/profile");
+  const connectionMessage = CONNECTION_MESSAGES[socketStatus];
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -92,6 +110,11 @@ export default function MatchPage() {
             : "Also looking one level above and below so you don't wait too long."}{" "}
           Keep this tab open — we&apos;ll connect you automatically.
         </p>
+        {connectionMessage && (
+          <Alert className="mt-6 max-w-md text-left" role="status">
+            <AlertDescription>{connectionMessage}</AlertDescription>
+          </Alert>
+        )}
         {error && (
           <Alert variant="destructive" className="mt-6 max-w-md text-left">
             <AlertDescription className="text-destructive">

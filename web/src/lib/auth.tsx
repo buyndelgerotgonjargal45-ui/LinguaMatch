@@ -2,8 +2,8 @@
 
 import type { UserDTO } from "@linguamatch/shared";
 import { usePathname, useRouter } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { api, ApiError } from "./api";
+import { createContext, useCallback, useContext, useEffect, useState, useSyncExternalStore } from "react";
+import { api, onSessionLost, refreshSession, serverStatusStore } from "./api";
 import { disconnectSocket } from "./socket";
 
 interface AuthContextValue {
@@ -20,14 +20,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserDTO | null>(null);
   const [loading, setLoading] = useState(true);
 
+  /**
+   * Restores the session from the refresh cookie. Only a 401 signs the user out; if the server
+   * can't be reached we stay in the loading state and try again, so nobody is sent to /login
+   * just because the API is asleep.
+   */
   const refresh = useCallback(async () => {
-    try {
-      setUser((await api.me()).user);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) setUser(null);
-      else console.error(err);
-    } finally {
-      setLoading(false);
+    for (let delay = 5000; ; delay = Math.min(delay * 2, 30_000)) {
+      try {
+        setUser(await refreshSession());
+        setLoading(false);
+        return;
+      } catch (err) {
+        console.error("[auth] couldn't reach the server to restore the session:", err);
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
   }, []);
 
@@ -35,13 +42,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     void refresh();
   }, [refresh]);
 
-  const logout = useCallback(async () => {
-    await api.logout();
-    disconnectSocket();
-    setUser(null);
+  // A rejected refresh anywhere (API call or socket) means the session is really gone.
+  useEffect(() => {
+    onSessionLost(() => {
+      disconnectSocket();
+      setUser(null);
+    });
+    return () => onSessionLost(null);
   }, []);
 
-  return <AuthContext.Provider value={{ user, loading, setUser, refresh, logout }}>{children}</AuthContext.Provider>;
+  const logout = useCallback(async () => {
+    disconnectSocket();
+    try {
+      await api.logout();
+    } finally {
+      setUser(null);
+    }
+  }, []);
+
+  return (
+    <AuthContext.Provider value={{ user, loading, setUser, refresh, logout }}>
+      <ServerWakeBanner />
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+/** Shown while API requests are being retried because the server is asleep or restarting. */
+function ServerWakeBanner() {
+  const status = useSyncExternalStore(serverStatusStore.subscribe, serverStatusStore.get, () => "ok" as const);
+  if (status !== "waking") return null;
+  return (
+    <div role="status" className="bg-primary text-primary-foreground fixed inset-x-0 top-0 z-50 px-4 py-2 text-center text-sm">
+      Waking up the server, this can take up to a minute...
+    </div>
+  );
 }
 
 export function useAuth() {

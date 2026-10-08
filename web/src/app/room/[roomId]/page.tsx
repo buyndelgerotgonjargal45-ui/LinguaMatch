@@ -24,7 +24,7 @@ import { useLocalMedia } from "@/hooks/useLocalMedia";
 import { useSpeechRecognition, type RecognizedSegment } from "@/hooks/useSpeechRecognition";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { useRequireUser } from "@/lib/auth";
-import { getSocket, type AppSocket } from "@/lib/socket";
+import { currentSocket, getSocket, type AppSocket } from "@/lib/socket";
 import { cn, formatClock } from "@/lib/utils";
 
 type RoomReady = Parameters<ServerToClientEvents["room:ready"]>[0];
@@ -53,9 +53,11 @@ export default function RoomPage() {
   const mounted = useRef(false);
   const startRtc = rtc.start;
 
+  // Connect only once the session is restored (e.g. after a page refresh). The socket's auth
+  // callback then hands the server a fresh access token, refreshing it first if needed.
   useEffect(() => {
-    setSocket(getSocket());
-  }, []);
+    if (user) setSocket(getSocket());
+  }, [user]);
 
   // Join once media is resolved (granted, audio-only, or denied — the call still works receive-only).
   useEffect(() => {
@@ -80,7 +82,7 @@ export default function RoomPage() {
     return () => {
       mounted.current = false;
       setTimeout(() => {
-        if (!mounted.current && !myAction.current) getSocket().emit("room:leave", { roomId, reason: "ended" });
+        if (!mounted.current && !myAction.current) currentSocket()?.emit("room:leave", { roomId, reason: "ended" });
       }, 0);
     };
   }, [roomId]);
