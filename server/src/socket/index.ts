@@ -1,8 +1,7 @@
 import { isTargetLanguage } from "@linguamatch/shared";
-import { parse as parseCookie } from "cookie";
 import type { Server as HttpServer } from "node:http";
 import { Server } from "socket.io";
-import { env } from "../config/env";
+import { isAllowedOrigin } from "../config/env";
 import { Matchmaker, QueueError } from "../services/matchmaking/matchmaker";
 import {
   addTranscriptSegment,
@@ -13,7 +12,7 @@ import {
   relaySignal,
   requestTopic,
 } from "../services/rooms/roomService";
-import { AUTH_COOKIE, verifyToken } from "../utils/auth";
+import { logAuthFailure, verifyToken } from "../utils/auth";
 import { setIO, userRoom, type AppSocket, type IO } from "./io";
 
 export let matchmaker: Matchmaker;
@@ -33,16 +32,28 @@ const isRoomId = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9
 
 export function createSocketServer(httpServer: HttpServer): IO {
   const io: IO = new Server(httpServer, {
-    cors: { origin: env.CLIENT_ORIGIN, credentials: true },
+    cors: { origin: (origin, cb) => cb(null, isAllowedOrigin(origin)), credentials: true },
     maxHttpBufferSize: 64 * 1024,
   });
   setIO(io);
 
+  // Auth uses the access token from the handshake `auth` payload, never cookies: the socket
+  // server lives on another site, where the web app's cookies are third-party and get blocked.
+  // CORS doesn't cover WebSocket upgrades, so the origin is checked here as well.
   io.use((socket, next) => {
-    const cookies = parseCookie(socket.handshake.headers.cookie ?? "");
-    const userId = verifyToken(cookies[AUTH_COOKIE] ?? (socket.handshake.auth?.token as string | undefined));
-    if (!userId) return next(new Error("unauthorized"));
-    socket.data.userId = userId;
+    const origin = socket.handshake.headers.origin;
+    if (!isAllowedOrigin(origin)) {
+      logAuthFailure("socket", "wrong_origin", { origin });
+      return next(new Error("forbidden_origin"));
+    }
+    const token = socket.handshake.auth?.token;
+    const result = verifyToken(typeof token === "string" ? token : null, "access");
+    if (!result.ok) {
+      logAuthFailure("socket", result.reason, { origin });
+      // The client reads `message` to decide whether to refresh its token and retry.
+      return next(Object.assign(new Error("unauthorized"), { data: { reason: result.reason } }));
+    }
+    socket.data.userId = result.userId;
     next();
   });
 

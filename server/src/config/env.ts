@@ -7,14 +7,20 @@ const boolish = z
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
+  /** Comma-separated list of exact web origins allowed to call the API and open sockets. */
   CLIENT_ORIGIN: z.string().default("http://localhost:3000"),
 
   MONGODB_URI: z.string().optional(),
   /** Dev convenience: spin up an ephemeral MongoDB when MONGODB_URI is not set. */
   USE_IN_MEMORY_DB: boolish.default(false),
 
-  JWT_SECRET: z.string().min(16, "JWT_SECRET must be at least 16 characters"),
-  JWT_EXPIRES_IN_DAYS: z.coerce.number().int().positive().default(7),
+  JWT_SECRET: z
+    .string({ error: "JWT_SECRET is missing. Set it to a long random string (the same value everywhere tokens are verified)." })
+    .min(32, "JWT_SECRET must be at least 32 characters"),
+  /** Lifetime of the in-memory access token sent as a Bearer header and in the socket handshake. */
+  ACCESS_TOKEN_TTL_MINUTES: z.coerce.number().int().positive().max(60).default(15),
+  /** Lifetime of the httpOnly refresh cookie; each refresh extends it. */
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
   AI_PROVIDER: z.enum(["anthropic"]).default("anthropic"),
   ANTHROPIC_API_KEY: z.string().optional(),
@@ -46,6 +52,15 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 export const isProd = env.NODE_ENV === "production";
+
+/** Exact origins allowed for CORS and Socket.IO. localhost:3000 is added in development only. */
+export const allowedOrigins: ReadonlySet<string> = new Set([
+  ...env.CLIENT_ORIGIN.split(",").map((o) => o.trim().replace(/\/+$/, "")).filter(Boolean),
+  ...(isProd ? [] : ["http://localhost:3000"]),
+]);
+
+/** Requests without an Origin header (same-origin GETs, curl, health checks) are not cross-site and are allowed. */
+export const isAllowedOrigin = (origin: string | undefined) => !origin || allowedOrigins.has(origin);
 
 export function iceServers() {
   const servers: { urls: string | string[]; username?: string; credential?: string }[] = [

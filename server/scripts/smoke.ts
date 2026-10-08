@@ -11,14 +11,19 @@ import { io, type Socket } from "socket.io-client";
 const BASE = process.argv[2] ?? "http://localhost:4000";
 type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
-async function api(path: string, opts: { method?: string; body?: unknown; cookie?: string } = {}) {
+async function api(path: string, opts: { method?: string; body?: unknown; token?: string; cookie?: string } = {}) {
   const res = await fetch(`${BASE}/api${path}`, {
     method: opts.method ?? (opts.body ? "POST" : "GET"),
-    headers: { "content-type": "application/json", ...(opts.cookie ? { cookie: opts.cookie } : {}) },
+    headers: {
+      "content-type": "application/json",
+      ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
+      ...(opts.cookie ? { cookie: opts.cookie } : {}),
+    },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const text = await res.text();
-  return { status: res.status, json: text ? JSON.parse(text) : null, cookie: res.headers.get("set-cookie")?.split(";")[0] };
+  const refreshCookie = res.headers.getSetCookie().find((c) => c.startsWith("lm_refresh=") && !c.startsWith("lm_refresh=;"));
+  return { status: res.status, json: text ? JSON.parse(text) : null, cookie: refreshCookie?.split(";")[0] };
 }
 
 function once<E extends keyof ServerToClientEvents>(s: ClientSocket, event: E, ms = 10_000) {
@@ -41,26 +46,36 @@ async function makeUser(name: string, level: string, nativeLanguage: string) {
   const reg = await api("/auth/register", {
     body: { username: `${name}_${suffix}`, email: `${name}${suffix}@example.com`, password: "password123" },
   });
-  check(reg.status === 201 && reg.cookie, `${name} registered`);
+  check(reg.status === 201 && reg.cookie && reg.json?.accessToken, `${name} registered (access token + refresh cookie)`);
+  const refreshed = await api("/auth/refresh", { cookie: reg.cookie, body: {} });
+  check(refreshed.status === 200 && refreshed.json?.accessToken && refreshed.cookie, `${name} refreshed the session`);
+  const token: string = refreshed.json.accessToken;
   const onboard = await api("/me/onboarding", {
-    cookie: reg.cookie,
+    token,
     body: { nativeLanguage, targetLanguage: "en", level, acceptRules: true, transcriptionConsent: true },
   });
   check(onboard.json?.user?.onboarded, `${name} onboarded (${nativeLanguage} → en ${level})`);
-  const socket: ClientSocket = io(BASE, { extraHeaders: { cookie: reg.cookie! }, transports: ["websocket"] });
+  const socket: ClientSocket = io(BASE, { auth: { token }, transports: ["websocket"] });
   await new Promise<void>((r, j) => {
     socket.on("connect", () => r());
     socket.on("connect_error", j);
   });
-  return { cookie: reg.cookie!, socket };
+  return { token, socket };
 }
 
 async function main() {
   const health = await api("/health");
   console.log("health:", JSON.stringify(health.json));
+  check((await fetch(`${BASE}/health`)).status === 200, "/health liveness probe");
 
   const unauth = await api("/me/profile");
   check(unauth.status === 401, "unauthenticated request rejected");
+  check((await api("/auth/refresh", { body: {} })).status === 401, "refresh without cookie rejected");
+
+  const anon = io(BASE, { transports: ["websocket"], reconnection: false });
+  const anonError = await new Promise<Error>((r) => anon.on("connect_error", r));
+  check(anonError.message === "unauthorized", "socket without token rejected");
+  anon.close();
 
   const a = await makeUser("alice", "B1", "mn");
   const b = await makeUser("bora", "B1", "ko");
@@ -111,17 +126,17 @@ async function main() {
   check(!ea.byPartner && eb.byPartner, "both notified; bora sees partner ended");
 
   await new Promise((r) => setTimeout(r, 1500));
-  const fa = await api(`/conversations/${roomId}/feedback`, { cookie: a.cookie });
-  const fb = await api(`/conversations/${roomId}/feedback`, { cookie: b.cookie });
+  const fa = await api(`/conversations/${roomId}/feedback`, { token: a.token });
+  const fb = await api(`/conversations/${roomId}/feedback`, { token: b.token });
   console.log(`  alice feedback: ${fa.json?.feedback?.status} — ${fa.json?.feedback?.statusMessage ?? ""}`);
   console.log(`  alice metrics: ${JSON.stringify(fa.json?.feedback?.metrics)}`);
   console.log(`  bora feedback:  ${fb.json?.feedback?.status} — ${fb.json?.feedback?.statusMessage ?? ""}`);
   check(fa.json?.feedback?.metrics?.wordCount > 25, "alice's own transcript was captured and measured");
   check(fb.json?.feedback?.status === "insufficient_data", "bora (silent) gets an honest insufficient-data report");
 
-  const block = await api(`/conversations/${roomId}/block`, { cookie: b.cookie, body: {} });
+  const block = await api(`/conversations/${roomId}/block`, { token: b.token, body: {} });
   check(block.status === 201, "bora blocks alice via conversation id");
-  const report = await api(`/conversations/${roomId}/report`, { cookie: b.cookie, body: { reason: "spam" } });
+  const report = await api(`/conversations/${roomId}/report`, { token: b.token, body: { reason: "spam" } });
   check(report.status === 201, "bora reports alice");
 
   // Blocked users must never be re-matched, even after waiting.
@@ -135,7 +150,7 @@ async function main() {
   a.socket.emit("queue:leave");
   b.socket.emit("queue:leave");
 
-  const profile = await api("/me/profile", { cookie: a.cookie });
+  const profile = await api("/me/profile", { token: a.token });
   check(profile.json?.profile?.totals?.conversations === 1, "profile counts the conversation");
 
   a.socket.close();

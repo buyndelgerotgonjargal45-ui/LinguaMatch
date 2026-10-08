@@ -3,7 +3,7 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import { createServer } from "node:http";
-import { env } from "./config/env";
+import { allowedOrigins, env, isAllowedOrigin } from "./config/env";
 import { connectDatabase, disconnectDatabase } from "./db/connect";
 import { assessmentRouter } from "./routes/assessment";
 import { authRouter } from "./routes/auth";
@@ -13,6 +13,7 @@ import { isAIConfigured } from "./services/ai";
 import { purgeStaleTranscripts } from "./services/feedback/feedbackService";
 import { SPEECH_MODE, pronunciationCapability } from "./services/speech";
 import { createSocketServer } from "./socket";
+import { logAuthFailure } from "./utils/auth";
 import { errorHandler } from "./utils/http";
 
 async function main() {
@@ -20,8 +21,20 @@ async function main() {
 
   const app = express();
   app.set("trust proxy", 1);
+
+  // Liveness probe for Render: no database, auth or middleware work.
+  app.get("/health", (_req, res) => {
+    res.json({ ok: true });
+  });
+
   app.use(helmet());
-  app.use(cors({ origin: env.CLIENT_ORIGIN, credentials: true }));
+  // Exact-origin allowlist (CLIENT_ORIGIN, comma-separated). Handles OPTIONS preflight too.
+  app.use(cors({ origin: (origin, cb) => cb(null, isAllowedOrigin(origin)), credentials: true }));
+  app.use((req, res, next) => {
+    if (isAllowedOrigin(req.headers.origin)) return next();
+    logAuthFailure("http", "wrong_origin", { path: req.path, origin: req.headers.origin });
+    res.status(403).json({ error: "Origin not allowed" });
+  });
   app.use(express.json({ limit: "100kb" }));
   app.use(cookieParser());
 
@@ -48,7 +61,8 @@ async function main() {
   void purgeStaleTranscripts().catch(console.error);
 
   httpServer.listen(env.PORT, () => {
-    console.log(`[server] LinguaMatch API listening on http://localhost:${env.PORT}`);
+    console.log(`[server] LinguaMatch API listening on port ${env.PORT}`);
+    console.log(`[server] Allowed origins: ${[...allowedOrigins].join(", ")}`);
     if (!isAIConfigured()) {
       console.warn("[server] ANTHROPIC_API_KEY is not set — topics, assessment and feedback will report that AI is unavailable.");
     }

@@ -9,8 +9,8 @@ import { User, toUserDTO } from "../models/User";
 import { matchmaker } from "../socket";
 import { unblockUser } from "../services/moderation/moderationService";
 import { buildProfileStats } from "../services/profile/profileService";
-import { AUTH_COOKIE, authCookieOptions } from "../utils/auth";
 import { HttpError, parseBody } from "../utils/http";
+import { clearSession } from "./auth";
 
 export const usersRouter = Router();
 usersRouter.use(requireAuth);
@@ -130,6 +130,6 @@ usersRouter.delete("/", async (req, res) => {
     User.updateMany({}, { $pull: { blockedUsers: user._id, recentPartners: user._id } }),
   ]);
   await user.deleteOne();
-  res.clearCookie(AUTH_COOKIE, { ...authCookieOptions(), maxAge: undefined });
+  clearSession(res);
   res.status(204).end();
 });
