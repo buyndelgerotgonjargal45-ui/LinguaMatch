@@ -25,6 +25,74 @@ npx tsx server/scripts/smoke.ts            # two-user end-to-end run over Socket
 npm run typecheck && npm run build
 ```
 
+## Deployment (Render + Vercel)
+
+The API (Express + Socket.IO) needs a process that stays running, so it runs on **Render**. The web app runs on **Vercel**. Vercel proxies `/api/*` to Render, so normal API calls and the refresh cookie stay on the web app's own domain. Socket.IO connects straight to Render and authenticates with a token, not a cookie.
+
+### How sign-in works
+
+- **Access token:** lasts 15 minutes and is kept only in browser memory. It's sent as `Authorization: Bearer …` and in the Socket.IO handshake `auth`.
+- **Refresh token:** an httpOnly cookie on `linguamatch.vercel.app` (path `/api/auth`), which reaches Render through the proxy. Because it's first-party, it works in Incognito. Each refresh extends it.
+- **When the server returns 401:** the web app refreshes once and retries once, and only shows the login page if the refresh is rejected. Network errors and cold starts never sign anyone out.
+- **Logging:** the server writes `[auth] http|socket rejected reason=missing|expired|invalid_signature|malformed|wrong_type|wrong_origin|unknown_user`. Tokens are never logged.
+
+### 1. Render (API)
+
+**New → Blueprint**, then pick this repo. `render.yaml` sets up the following (or enter it by hand under **New → Web Service**):
+
+| Setting | Value |
+|---|---|
+| Runtime | Node, version 22 (`NODE_VERSION=22`) |
+| Root directory | `server` |
+| Build command | `cd .. && npm ci --workspace server --include-workspace-root=false` |
+| Start command | `npm start` |
+| Health check path | `/health` |
+| Instances | 1. The matchmaking queue is in memory. |
+
+Environment variables on Render:
+
+| Variable | Value |
+|---|---|
+| `NODE_ENV` | `production` |
+| `CLIENT_ORIGIN` | `https://linguamatch.vercel.app`. For preview URLs, add them comma-separated. |
+| `MONGODB_URI` | Your Atlas URI. Include a database name, e.g. `…mongodb.net/linguamatch?…` |
+| `JWT_SECRET` | 32+ random characters. The server refuses to start without it. |
+| `ACCESS_TOKEN_TTL_MINUTES` | `15` |
+| `REFRESH_TOKEN_TTL_DAYS` | `30` |
+| `ANTHROPIC_API_KEY` | Optional |
+| `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL` | Optional, recommended |
+
+Don't set `PORT`; Render provides it. In Atlas, allow Render's outbound IPs (or `0.0.0.0/0`) under Network Access.
+
+### 2. Vercel (web)
+
+- **Project → Settings → General → Root Directory:** `web`. Vercel installs the npm workspaces from the repo root by itself.
+- **Environment variables (Production, and Preview if you use it):**
+  - `API_URL` = `https://<your-service>.onrender.com`
+  - `NEXT_PUBLIC_SOCKET_URL` = `https://<your-service>.onrender.com`
+
+  A Vercel build fails if either is missing.
+- **Redeploy** after any change to these variables. `NEXT_PUBLIC_SOCKET_URL` and the `/api` proxy target are fixed at build time.
+
+### Cold starts
+
+Render's free plan sleeps after about 15 minutes idle and takes up to a minute to wake. While it wakes, the web app shows "Waking up the server, this can take up to a minute..." and retries with exponential backoff, for both API calls and the socket. It never treats this as an expired session.
+
+### Manual test checklist
+
+Run through this after each deploy:
+
+- [ ] **Normal window:** sign up, onboard, click **Start practicing**. /match shows the waiting count and the timer runs.
+- [ ] **Incognito window:** same flow. Reload /match and you stay signed in (the refresh cookie is first-party).
+- [ ] **Two windows match:** a normal and an Incognito window with the same language and level get matched into a room. Reloading the room page reconnects to the same room.
+- [ ] **Token expiry while waiting:** stay on /match for 20+ minutes (more than the 15-minute access token). No "session expired" message appears. To make it quicker, set `ACCESS_TOKEN_TTL_MINUTES=1` on Render, wait 3 minutes, then switch Wi-Fi off and on to force a reconnect. The socket reconnects and you rejoin the queue.
+- [ ] **Real sign-out:** in DevTools → Application → Cookies, delete `lm_refresh`, then reload /match. You land on `/login?next=/match`.
+- [ ] **Cold start:** with the Render service asleep (or suspended and resumed), open /match. You see the waking-up message, and it connects on its own within about a minute.
+- [ ] **Cancel/leave cleanup:** press **Cancel** or navigate away. Render logs show no further `queue:join` for you, the waiting count in a second window drops, and the timer stops.
+- [ ] **Render logs:** `[auth] … reason=…` lines show the reason for any rejection and contain no tokens.
+
+Automated: `npm test` covers token verification reasons and the origin allowlist. `npx tsx server/scripts/smoke.ts <url>` runs register → refresh → socket auth → match → room → feedback against a running server.
+
 ## Architecture
 
 ```
@@ -33,7 +101,7 @@ server/   Express + Socket.IO + Mongoose
   src/config        env validation (zod)
   src/models        User, MatchQueue, Conversation, ConversationFeedback, Report, Assessment
   src/routes        auth, me (onboarding/settings/profile), conversations (feedback/report/block), assessment
-  src/socket        Socket.IO auth + event wiring
+  src/socket        Socket.IO handshake auth (access token) + event wiring
   src/services
     ai/             provider-agnostic interface + Anthropic implementation, prompts, schemas
     speech/         speech-to-text layer (separate from AI analysis), segment sanitizing
