@@ -1,0 +1,50 @@
+# Render Blueprint for the LinguaMatch API (Express + Socket.IO).
+# Render → New → Blueprint → pick this repo. Values marked `sync: false` are asked for on
+# first deploy and never stored in git.
+services:
+  - type: web
+    name: linguamatch-api
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: server
+    # The server imports the `shared` workspace, so install from the repo root (one level up).
+    buildCommand: cd .. && npm ci --workspace server --include-workspace-root=false
+    startCommand: npm start
+    healthCheckPath: /health
+    # The matchmaking queue lives in memory: run exactly one instance.
+    numInstances: 1
+    autoDeploy: true
+    buildFilter:
+      paths:
+        - server/**
+        - shared/**
+        - package.json
+        - package-lock.json
+        - render.yaml
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      # Exact web origin(s), comma-separated. Add Vercel preview URLs here if you use them.
+      - key: CLIENT_ORIGIN
+        value: https://linguamatch.vercel.app
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ACCESS_TOKEN_TTL_MINUTES
+        value: "15"
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: "30"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-5-5
+      - key: TURN_URL
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false
