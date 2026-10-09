@@ -10,14 +10,14 @@ import { iceServers } from "../../config/env";
 import { Conversation, conversationDurationSeconds, type ConversationDoc } from "../../models/Conversation";
 import { User } from "../../models/User";
 import { conversationRoom, getIO, userRoom, type AppSocket } from "../../socket/io";
-import { AIResponseError, getAI, isAIConfigured } from "../ai";
 import { generateConversationFeedback } from "../feedback/feedbackService";
 import type { MatchPair } from "../matchmaking/algorithm";
 import { sanitizeSegment } from "../speech";
+import { pickRandomTopic } from "../topics/topicBank";
 
 const RECONNECT_GRACE_MS = 20_000;
 const JOIN_TIMEOUT_MS = 45_000;
-const TOPIC_COOLDOWN_MS = 8_000;
+const TOPIC_COOLDOWN_MS = 2_000;
 const MIN_SEGMENT_INTERVAL_MS = 250;
 const MAX_SEGMENTS_PER_CONVERSATION = 3000;
 
@@ -190,6 +190,7 @@ function latestTopic(c: ConversationDoc): Topic | null {
   return { title: t.title, description: t.description ?? "", questions: t.questions ?? [], level: t.level as CefrLevel };
 }
 
+/** Picks a random topic from the topic bank for the pair's level and sends it to the room. */
 async function generateTopic(conversationId: string) {
   const state = roomState(conversationId);
   const io = getIO();
@@ -198,53 +199,36 @@ async function generateTopic(conversationId: string) {
   state.topicError = null;
   state.lastTopicRequestAt = Date.now();
 
-  const conversation = await Conversation.findById(conversationId);
-  if (!conversation || conversation.status !== "active") {
-    state.topicLoading = false;
-    return;
-  }
-  io.to(room).emit("topic:update", { topic: latestTopic(conversation), loading: true });
-
-  if (!isAIConfigured()) {
-    state.topicLoading = false;
-    state.topicError = "AI topics are unavailable because the server has no AI key configured. Feel free to talk about anything!";
-    io.to(room).emit("topic:update", { topic: null, loading: false, error: state.topicError });
-    return;
-  }
-
   try {
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation || conversation.status !== "active") return;
+
     const [a, b] = conversation.participants;
     const level = lowerLevel(a!.level as CefrLevel, b!.level as CefrLevel);
+    // Avoid repeating topics from this call and the pair's recent calls.
     const recent = await Conversation.find({
       _id: { $ne: conversation._id },
       "participants.userId": { $in: conversation.participants.map((p) => p.userId) },
-      targetLanguage: conversation.targetLanguage,
     })
       .sort({ startTime: -1 })
       .limit(10)
       .select("topics.title")
       .lean();
-    const previousTopics = [
+    const used = [
       ...conversation.topics.map((t) => t.title ?? ""),
       ...recent.flatMap((c) => c.topics.map((t) => t.title ?? "")),
     ].filter(Boolean);
 
-    const topic = await getAI().generateTopic({
-      targetLanguage: conversation.targetLanguage,
-      level,
-      previousTopics: [...new Set(previousTopics)].slice(0, 30),
-      minutesElapsed: conversationDurationSeconds(conversation) / 60,
-    });
+    const topic = pickRandomTopic(level, used, latestTopic(conversation)?.title);
     const updated = await Conversation.findOneAndUpdate(
       { _id: conversationId, status: "active" },
       { $push: { topics: { ...topic, createdAt: new Date() } } },
     );
     if (updated) io.to(room).emit("topic:update", { topic, loading: false });
   } catch (err) {
-    console.error("[topic] Generation failed:", err);
-    state.topicError =
-      err instanceof AIResponseError ? err.message : "Couldn't generate a topic right now. Try again in a moment.";
-    io.to(room).emit("topic:update", { topic: latestTopic(conversation), loading: false, error: state.topicError });
+    console.error("[topic] Couldn't pick a topic:", err);
+    state.topicError = "Couldn't load a topic right now. Try again in a moment.";
+    io.to(room).emit("topic:update", { topic: null, loading: false, error: state.topicError });
   } finally {
     state.topicLoading = false;
   }

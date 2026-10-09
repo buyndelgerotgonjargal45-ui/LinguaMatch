@@ -102,6 +102,12 @@ async function main() {
   check(ra.role === "caller" && rb.role === "callee", "roles assigned caller/callee");
   check(ra.partner.displayName.startsWith("bora") && !("userId" in ra.partner), "partner info excludes ids/email");
   check(ra.iceServers.length > 0, "ICE servers provided");
+  check(ra.topic?.title && ra.topic.level === "B1" && ra.topic.questions.length === 3, `random B1 topic shown: "${ra.topic?.title}"`);
+  await new Promise((r) => setTimeout(r, 2100)); // let join-time topic replays arrive and the 2s cooldown pass
+  const nextTopic = once(b.socket, "topic:update");
+  a.socket.emit("topic:request", { roomId });
+  const nt = (await nextTopic).topic;
+  check(nt?.title && nt.title !== ra.topic?.title, `"New topic" gives a different one: "${nt?.title}"`);
 
   const sig = once(b.socket, "signal");
   a.socket.emit("signal", { roomId, data: { type: "offer", sdp: "v=0 fake" } });
