@@ -16,7 +16,7 @@ if (process.env.VERCEL) {
   }
 }
 
-const API_URL = (process.env.API_URL ?? "http://localhost:4000").replace(/\/+$/, "");
+const API_URL = (process.env.API_URL ?? "http://localhost:4000").trim().replace(/\/+$/, "");
 
 const nextConfig: NextConfig = {
   transpilePackages: ["@linguamatch/shared"],

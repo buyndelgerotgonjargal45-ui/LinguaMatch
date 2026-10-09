@@ -18,7 +18,7 @@ export type SocketStatus = "connecting" | "connected" | "unreachable" | "reconne
 
 // Next.js inlines NEXT_PUBLIC_* at build time. The localhost fallback is for `npm run dev` only;
 // next.config.ts fails a Vercel build that doesn't set it.
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://localhost:4000";
+const SOCKET_URL = (process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://localhost:4000").trim().replace(/\/+$/, "");
 
 let socket: AppSocket | null = null;
 let status: SocketStatus = "connecting";
