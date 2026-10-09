@@ -25,6 +25,8 @@ interface RoomState {
   sockets: Map<string, string>;
   timers: Map<string, NodeJS.Timeout>;
   topicLoading: boolean;
+  /** Last topic error, replayed to people who join after it was sent. */
+  topicError: string | null;
   lastTopicRequestAt: number;
   segmentCount: number;
   lastSegmentAt: Map<string, number>;
@@ -39,6 +41,7 @@ function roomState(conversationId: string): RoomState {
       sockets: new Map(),
       timers: new Map(),
       topicLoading: false,
+      topicError: null,
       lastTopicRequestAt: 0,
       segmentCount: 0,
       lastSegmentAt: new Map(),
@@ -144,7 +147,12 @@ export async function joinRoom(socket: AppSocket, conversationId: string) {
       iceServers: iceServers(),
     });
   });
-  if (state.topicLoading) io.to(socket.id).emit("topic:update", { topic, loading: true });
+  // The first topic is generated at match time, before anyone is in the room, so replay its state.
+  io.to(conversationRoom(conversationId)).emit("topic:update", {
+    topic,
+    loading: state.topicLoading,
+    ...(state.topicError && { error: state.topicError }),
+  });
 }
 
 export function handleSocketDisconnect(socket: AppSocket) {
@@ -187,6 +195,7 @@ async function generateTopic(conversationId: string) {
   const io = getIO();
   const room = conversationRoom(conversationId);
   state.topicLoading = true;
+  state.topicError = null;
   state.lastTopicRequestAt = Date.now();
 
   const conversation = await Conversation.findById(conversationId);
@@ -198,11 +207,8 @@ async function generateTopic(conversationId: string) {
 
   if (!isAIConfigured()) {
     state.topicLoading = false;
-    io.to(room).emit("topic:update", {
-      topic: null,
-      loading: false,
-      error: "AI topics are unavailable because the server has no AI key configured. Feel free to talk about anything!",
-    });
+    state.topicError = "AI topics are unavailable because the server has no AI key configured. Feel free to talk about anything!";
+    io.to(room).emit("topic:update", { topic: null, loading: false, error: state.topicError });
     return;
   }
 
@@ -236,11 +242,9 @@ async function generateTopic(conversationId: string) {
     if (updated) io.to(room).emit("topic:update", { topic, loading: false });
   } catch (err) {
     console.error("[topic] Generation failed:", err);
-    io.to(room).emit("topic:update", {
-      topic: latestTopic(conversation),
-      loading: false,
-      error: err instanceof AIResponseError ? err.message : "Couldn't generate a topic right now. Try again in a moment.",
-    });
+    state.topicError =
+      err instanceof AIResponseError ? err.message : "Couldn't generate a topic right now. Try again in a moment.";
+    io.to(room).emit("topic:update", { topic: latestTopic(conversation), loading: false, error: state.topicError });
   } finally {
     state.topicLoading = false;
   }
